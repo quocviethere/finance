@@ -1,0 +1,32 @@
+.transactions-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.transactions-table th,
+.transactions-table td {
+  padding: 0.6rem;
+  border-bottom: 1px solid #e5e7eb;
+  text-align: left;
+}
+
+.transactions-table tr:nth-child(even) {
+  background: #f3f4f6;
+}
+
+.transactions-table button {
+  margin-right: 0.3rem;
+  padding: 0.3rem 0.6rem;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #4b5563;
+  font-size: 1rem;
+  display: inline-flex;
+  align-items: center;
+}
+
+.transactions-table button:hover {
+  color: #1abc9c;
+} 
