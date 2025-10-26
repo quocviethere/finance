@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Wallet, TrendingDown, Trash2, Edit3, Search, Plus, Download, MessageCircle, Send, X, PiggyBank, TrendingUp } from 'lucide-react';
 import {
@@ -23,6 +23,7 @@ import {
   addDoc,
   deleteDoc,
   doc,
+  setDoc,
   updateDoc,
   serverTimestamp,
   query,
@@ -47,6 +48,15 @@ const DEFAULT_EXPENSE_CATS = [
 ];
 
 const COLORS = ['#112D4E', '#3F72AF', '#DBE2EF', '#F9F7F7'];
+
+const DEFAULT_SETTINGS = Object.freeze({ savingAmount: null, monthlyBudget: null });
+const SETTINGS_STORAGE_KEY = 'vnd-settings';
+const LEGACY_SETTINGS_KEYS = Object.freeze({
+  savingAmount: 'vnd-saving-amount',
+  monthlyBudget: 'vnd-monthly-budget',
+});
+const SETTINGS_COLLECTION = 'settings';
+const SETTINGS_DOC_ID = 'global';
 
 function useLocalStorage(key, initial) {
   const [value, setValue] = useState(() => {
@@ -140,8 +150,106 @@ function useTransactions() {
   return { transactions, add, remove, update, loading, source };
 }
 
+function useFinanceSettings() {
+  const [localSettings, setLocalSettings] = useLocalStorage(SETTINGS_STORAGE_KEY, DEFAULT_SETTINGS);
+  const db = exportedDb || getFirestore();
+  const usingFirestore = Boolean(db);
+  const [settings, setSettings] = useState(localSettings);
+  const [loading, setLoading] = useState(usingFirestore);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const legacySavingsRaw = window.localStorage.getItem(LEGACY_SETTINGS_KEYS.savingAmount);
+      const legacyBudgetRaw = window.localStorage.getItem(LEGACY_SETTINGS_KEYS.monthlyBudget);
+      if (legacySavingsRaw !== null || legacyBudgetRaw !== null) {
+        const migrated = {
+          savingAmount: legacySavingsRaw !== null ? JSON.parse(legacySavingsRaw) : null,
+          monthlyBudget: legacyBudgetRaw !== null ? JSON.parse(legacyBudgetRaw) : null,
+        };
+        setLocalSettings(migrated);
+        window.localStorage.removeItem(LEGACY_SETTINGS_KEYS.savingAmount);
+        window.localStorage.removeItem(LEGACY_SETTINGS_KEYS.monthlyBudget);
+      }
+    } catch (err) {
+      console.warn('Settings migration failed', err);
+    }
+  }, [setLocalSettings]);
+
+  useEffect(() => {
+    if (!usingFirestore) {
+      return;
+    }
+
+    const ref = doc(db, SETTINGS_COLLECTION, SETTINGS_DOC_ID);
+    setLoading(true);
+    const unsubscribe = onSnapshot(
+      ref,
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          const next = {
+            savingAmount: data?.savingAmount ?? null,
+            monthlyBudget: data?.monthlyBudget ?? null,
+          };
+          setSettings(next);
+          setLocalSettings(next);
+        } else {
+          setSettings(DEFAULT_SETTINGS);
+          setDoc(ref, { ...DEFAULT_SETTINGS, updatedAt: serverTimestamp() }, { merge: true }).catch((err) =>
+            console.error('Failed to initialize settings document', err)
+          );
+        }
+        setLoading(false);
+      },
+      (error) => {
+        console.error('Settings snapshot error', error);
+        setLoading(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [usingFirestore, db, setLocalSettings]);
+
+  useEffect(() => {
+    if (!usingFirestore) {
+      setSettings(localSettings);
+      setLoading(false);
+    }
+  }, [usingFirestore, localSettings]);
+
+  const updateSettings = useCallback(
+    async (patch) => {
+      let previousSettings = DEFAULT_SETTINGS;
+      setSettings((prev) => {
+        previousSettings = prev;
+        return { ...prev, ...patch };
+      });
+      setLocalSettings((prev) => ({ ...prev, ...patch }));
+
+      if (!usingFirestore) {
+        return;
+      }
+
+      const ref = doc(db, SETTINGS_COLLECTION, SETTINGS_DOC_ID);
+      try {
+        await setDoc(ref, { ...patch, updatedAt: serverTimestamp() }, { merge: true });
+      } catch (err) {
+        console.error('Failed to update settings', err);
+        setSettings(previousSettings);
+        setLocalSettings(previousSettings);
+        throw err;
+      }
+    },
+    [db, setLocalSettings, usingFirestore]
+  );
+
+  return { settings, updateSettings, loading, source: usingFirestore ? 'firestore' : 'local' };
+}
+
 export default function FinanceTrackerApp() {
   const { transactions, add, remove, update, loading, source } = useTransactions();
+  const { settings, updateSettings: persistSettings } = useFinanceSettings();
 
   const [queryText, setQueryText] = useState('');
   const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'income' | 'expense'
@@ -156,10 +264,21 @@ export default function FinanceTrackerApp() {
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState([]);
   const [chatLoading, setChatLoading] = useState(false);
-  const [savingAmount, setSavingAmount] = useLocalStorage('vnd-saving-amount', null);
   const [editSavingsOpen, setEditSavingsOpen] = useState(false);
-  const [monthlyBudget, setMonthlyBudget] = useLocalStorage('vnd-monthly-budget', null);
   const [editBudgetOpen, setEditBudgetOpen] = useState(false);
+
+  const savingAmount = settings.savingAmount;
+  const monthlyBudget = settings.monthlyBudget;
+
+  const saveSavingAmount = useCallback(
+    (value) => persistSettings({ savingAmount: value }),
+    [persistSettings]
+  );
+
+  const saveMonthlyBudget = useCallback(
+    (value) => persistSettings({ monthlyBudget: value }),
+    [persistSettings]
+  );
 
   const openSearchPrompt = () => {
     setTempSearch(queryText || '');
@@ -614,14 +733,14 @@ export default function FinanceTrackerApp() {
         open={editBudgetOpen}
         onOpenChange={setEditBudgetOpen}
         value={monthlyBudget}
-        onSave={setMonthlyBudget}
+        onSave={saveMonthlyBudget}
         spent={monthlyExpenses}
       />
       <EditSavingModal
         open={editSavingsOpen}
         onOpenChange={setEditSavingsOpen}
         value={savingAmount}
-        onSave={setSavingAmount}
+        onSave={saveSavingAmount}
         computedSavings={computedSavings}
       />
     </div>
@@ -933,26 +1052,43 @@ function AddSavingModal({ onAdd, compact }) {
 
 function EditMonthlyBudgetModal({ open, onOpenChange, value, onSave, spent }) {
   const [input, setInput] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setInput(value != null ? String(Math.round(value)) : '');
   }, [open, value]);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     const next = Number(input);
     if (!Number.isFinite(next) || next < 0) {
       alert('Enter a valid non-negative number');
       return;
     }
-    onSave(next);
-    onOpenChange(false);
+    try {
+      setSubmitting(true);
+      await onSave(next);
+      onOpenChange(false);
+    } catch (err) {
+      console.error('Failed to save monthly budget', err);
+      alert('Could not save the monthly budget. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  const handleClear = () => {
-    onSave(null);
-    onOpenChange(false);
+  const handleClear = async () => {
+    try {
+      setSubmitting(true);
+      await onSave(null);
+      onOpenChange(false);
+    } catch (err) {
+      console.error('Failed to clear monthly budget', err);
+      alert('Could not clear the monthly budget. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -969,10 +1105,10 @@ function EditMonthlyBudgetModal({ open, onOpenChange, value, onSave, spent }) {
         <div style={{ fontSize: 12, color: '#6b7280' }}>{input ? VND.format(Number(input)) : ''}</div>
         <div style={{ fontSize: 11, color: '#9ca3af' }}>Expenses recorded this month: {VND.format(spent)}</div>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 8 }}>
-          <button type="button" onClick={handleClear} style={{ padding: '8px 12px', borderRadius: 12, background: '#DBE2EF', color: '#112D4E', border: 'none' }}>
+          <button type="button" onClick={handleClear} disabled={submitting} style={{ padding: '8px 12px', borderRadius: 12, background: '#DBE2EF', color: '#112D4E', border: 'none', opacity: submitting ? 0.65 : 1 }}>
             Clear budget
           </button>
-          <button type="submit" style={{ padding: '8px 12px', borderRadius: 12, background: '#3F72AF', color: '#F9F7F7', border: 'none' }}>
+          <button type="submit" disabled={submitting} style={{ padding: '8px 12px', borderRadius: 12, background: '#3F72AF', color: '#F9F7F7', border: 'none', opacity: submitting ? 0.65 : 1 }}>
             Save budget
           </button>
         </div>
@@ -983,6 +1119,7 @@ function EditMonthlyBudgetModal({ open, onOpenChange, value, onSave, spent }) {
 
 function EditSavingModal({ open, onOpenChange, value, onSave, computedSavings }) {
   const [input, setInput] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -990,20 +1127,36 @@ function EditSavingModal({ open, onOpenChange, value, onSave, computedSavings })
     setInput(base != null ? String(Math.round(base)) : '');
   }, [open, value, computedSavings]);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     const next = Number(input);
     if (!Number.isFinite(next) || next < 0) {
       alert('Enter a valid non-negative number');
       return;
     }
-    onSave(next);
-    onOpenChange(false);
+    try {
+      setSubmitting(true);
+      await onSave(next);
+      onOpenChange(false);
+    } catch (err) {
+      console.error('Failed to save savings amount', err);
+      alert('Could not save the savings amount. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  const handleReset = () => {
-    onSave(null);
-    onOpenChange(false);
+  const handleReset = async () => {
+    try {
+      setSubmitting(true);
+      await onSave(null);
+      onOpenChange(false);
+    } catch (err) {
+      console.error('Failed to reset savings amount', err);
+      alert('Could not reset the savings amount. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -1020,10 +1173,10 @@ function EditSavingModal({ open, onOpenChange, value, onSave, computedSavings })
         <div style={{ fontSize: 12, color: '#6b7280' }}>{input ? VND.format(Number(input)) : ''}</div>
         <div style={{ fontSize: 11, color: '#9ca3af' }}>Automatic value from income - expenses: {VND.format(computedSavings)}</div>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 8 }}>
-          <button type="button" onClick={handleReset} style={{ padding: '8px 12px', borderRadius: 12, background: '#DBE2EF', color: '#112D4E', border: 'none' }}>
+          <button type="button" onClick={handleReset} disabled={submitting} style={{ padding: '8px 12px', borderRadius: 12, background: '#DBE2EF', color: '#112D4E', border: 'none', opacity: submitting ? 0.65 : 1 }}>
             Use automatic
           </button>
-          <button type="submit" style={{ padding: '8px 12px', borderRadius: 12, background: '#3F72AF', color: '#F9F7F7', border: 'none' }}>
+          <button type="submit" disabled={submitting} style={{ padding: '8px 12px', borderRadius: 12, background: '#3F72AF', color: '#F9F7F7', border: 'none', opacity: submitting ? 0.65 : 1 }}>
             Save
           </button>
         </div>
