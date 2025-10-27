@@ -878,7 +878,7 @@ function TransactionTable({ items, onDelete, onEdit }) {
 
   return (
     <div style={{ position: 'relative' }}>
-      <div style={{ borderRadius: 12, border: '1px solid #DBE2EF', overflow: 'hidden' }}>
+      <div style={{ maxHeight: 500, overflowY: 'auto', borderRadius: 12, border: '1px solid #DBE2EF', overflow: 'hidden' }}>
         <table style={{ width: '100%', fontSize: 14, borderCollapse: 'collapse' }}>
           <thead style={{ background: '#DBE2EF' }}>
             <tr>
